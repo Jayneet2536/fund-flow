@@ -53,7 +53,7 @@ public class InferenceService {
         }
     }
 
-    // ── GENERATE REPORT ───────────────────────────────────────────
+    // ── GENERATE REPORT ON DEMAND ────────────────────────────────
     public Map<String, Object> generateReport(
             ScoreResponse scoreResult,
             List<AccountNode> nodes,

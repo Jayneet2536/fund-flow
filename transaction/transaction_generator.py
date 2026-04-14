@@ -231,7 +231,7 @@ FRAUD_GENERATORS = [
 def send(transactions: List[Dict], delay: float = 0.5) -> bool:
     for tx in transactions:
         try:
-            resp = requests.post(BACKEND_URL, json=tx, timeout=5,
+            resp = requests.post(BACKEND_URL, json=tx, timeout=10,
                                  headers={"Content-Type": "application/json"})
             flag  = "🚨" if tx.get("is_fraud_seed") else "  "
             fname = tx.get("from_name", tx["from_account"])[:14]

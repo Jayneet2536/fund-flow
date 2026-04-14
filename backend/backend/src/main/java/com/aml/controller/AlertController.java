@@ -45,13 +45,13 @@ public class AlertController {
         );
     }
 
-    // Frontend requests report generation
+    // Frontend requests report generation on demand for a selected alert
     @PostMapping("/alerts/{transactionId}/report")
     public ResponseEntity<Map<String, Object>> generateReport(
             @PathVariable String transactionId,
             @RequestBody Map<String, Object> body) {
         try {
-            // Forward the entire body to inference service
+            // Forward the frontend-provided report context to the inference service
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
 

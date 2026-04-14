@@ -5,8 +5,6 @@ import com.aml.model.AccountNode;
 import com.aml.model.EdgeData;
 import com.aml.model.Transaction;
 import org.neo4j.driver.*;
-import org.neo4j.driver.types.Node;
-import org.neo4j.driver.types.Relationship;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Repository;
 
@@ -38,119 +36,150 @@ public class Neo4jRepository {
     }
 
     // ── STORE TRANSACTION ──────────────────────────────────────────
-    public void storeTransaction(Transaction tx) {
+    public boolean storeTransaction(Transaction tx) {
         try (Session session = driver.session()) {
-            session.writeTransaction(t -> {
-                // 1. Create or update FROM account node
-                t.run("""
-                    MERGE (a:Account {id: $accountId})
-                    ON CREATE SET
-                        a.name              = $name,
-                        a.total_sent        = $amount,
-                        a.total_received    = 0.0,
-                        a.tx_count_out      = 1,
-                        a.tx_count_in       = 0,
-                        a.first_tx_timestamp= $timestamp,
-                        a.last_tx_timestamp = $timestamp,
-                        a.dormancy_score    = 0.0,
-                        a.is_new_account    = true
-                    ON MATCH SET
-                        a.name              = $name,
-                        a.total_sent        = a.total_sent + $amount,
-                        a.tx_count_out      = a.tx_count_out + 1,
-                        a.last_tx_timestamp = $timestamp,
-                        a.is_new_account    = false,
-                        a.dormancy_score    = $dormancyScore
-                    """,
-                        Map.of(
-                                "accountId",    tx.getFromAccount(),
-                                "name",         tx.getFromName() != null ? tx.getFromName() : "Unknown",
-                                "amount",       tx.getAmount(),
-                                "timestamp",    tx.getTimestamp(),
-                                "dormancyScore",0.0
-                        )
-                );
+            return session.writeTransaction(t -> persistTransaction(t, tx));
+        }
+    }
 
-                // 2. Create or update TO account node
-                t.run("""
-                    MERGE (a:Account {id: $accountId})
-                    ON CREATE SET
-                        a.name              = $name,
-                        a.total_sent        = 0.0,
-                        a.total_received    = $amount,
-                        a.tx_count_out      = 0,
-                        a.tx_count_in       = 1,
-                        a.first_tx_timestamp= $timestamp,
-                        a.last_tx_timestamp = $timestamp,
-                        a.dormancy_score    = 0.0,
-                        a.is_new_account    = true
-                    ON MATCH SET
-                        a.name              = $name,
-                        a.total_received    = a.total_received + $amount,
-                        a.tx_count_in       = a.tx_count_in + 1,
-                        a.last_tx_timestamp = $timestamp,
-                        a.is_new_account    = false,
-                        a.dormancy_score    = $dormancyScore
-                    """,
-                        Map.of(
-                                "accountId",    tx.getToAccount(),
-                                "name",         tx.getToName() != null ? tx.getToName() : "Unknown",
-                                "amount",       tx.getAmount(),
-                                "timestamp",    tx.getTimestamp(),
-                                "dormancyScore",0.0
-                        )
-                );
+    public List<Transaction> storeTransactionsBatch(List<Transaction> transactions) {
+        if (transactions == null || transactions.isEmpty()) {
+            return Collections.emptyList();
+        }
 
-                // 3. Create transaction edge
-                t.run("""
-                    MATCH (from:Account {id: $fromId})
-                    MATCH (to:Account {id: $toId})
-                    CREATE (from)-[r:TRANSFER {
-                        id:             $txId,
-                        amount:         $amount,
-                        currency:       $currency,
-                        payment_format: $paymentFormat,
-                        timestamp:      $timestamp,
-                        pattern_id:     $patternId,
-                        is_fraud:       false,
-                        fraud_score:    0.0,
-                        typology:       'Pending'
-                    }]->(to)
-                    """,
-                        Map.of(
-                                "fromId",        tx.getFromAccount(),
-                                "toId",          tx.getToAccount(),
-                                "txId",          tx.getTransactionId(),
-                                "amount",        tx.getAmount(),
-                                "currency",      tx.getCurrency() != null ? tx.getCurrency() : "INR",
-                                "paymentFormat", tx.getPaymentFormat() != null ? tx.getPaymentFormat() : "NEFT",
-                                "timestamp",     tx.getTimestamp(),
-                                "patternId",     tx.getPatternId() != null ? tx.getPatternId() : ""
-                        )
-                );
-
-                // 4. Update unique_counterparts for both accounts
-                t.run("""
-                    MATCH (a:Account {id: $fromId})-[:TRANSFER]->(neighbor)
-                    WITH a, count(DISTINCT neighbor) AS cnt
-                    SET a.unique_counterparts = cnt
-                    """, Map.of("fromId", tx.getFromAccount()));
-
-                t.run("""
-                    MATCH (a:Account {id: $toId})<-[:TRANSFER]-(neighbor)
-                    WITH a, count(DISTINCT neighbor) AS cnt
-                    SET a.unique_counterparts = cnt
-                    """, Map.of("toId", tx.getToAccount()));
-
-                return null;
+        try (Session session = driver.session()) {
+            return session.writeTransaction(t -> {
+                List<Transaction> insertedTransactions = new ArrayList<>();
+                for (Transaction tx : transactions) {
+                    if (persistTransaction(t, tx)) {
+                        insertedTransactions.add(tx);
+                    }
+                }
+                return insertedTransactions;
             });
         }
+    }
+
+    private boolean persistTransaction(org.neo4j.driver.Transaction txContext,
+                                       Transaction tx) {
+        boolean alreadyExists = txContext.run("""
+                MATCH ()-[r:TRANSFER {id: $txId}]->()
+                RETURN count(r) > 0 AS exists
+                """,
+                Map.of("txId", tx.getTransactionId())
+        ).single().get("exists").asBoolean(false);
+
+        if (alreadyExists) {
+            return false;
+        }
+
+        txContext.run("""
+                MERGE (a:Account {id: $accountId})
+                ON CREATE SET
+                    a.name              = $name,
+                    a.total_sent        = $amount,
+                    a.total_received    = 0.0,
+                    a.tx_count_out      = 1,
+                    a.tx_count_in       = 0,
+                    a.first_tx_timestamp= $timestamp,
+                    a.last_tx_timestamp = $timestamp,
+                    a.dormancy_score    = 0.0,
+                    a.is_new_account    = true
+                ON MATCH SET
+                    a.name              = $name,
+                    a.total_sent        = a.total_sent + $amount,
+                    a.tx_count_out      = a.tx_count_out + 1,
+                    a.last_tx_timestamp = $timestamp,
+                    a.is_new_account    = false,
+                    a.dormancy_score    = $dormancyScore
+                """,
+                Map.of(
+                        "accountId", tx.getFromAccount(),
+                        "name", tx.getFromName() != null ? tx.getFromName() : "Unknown",
+                        "amount", tx.getAmount(),
+                        "timestamp", tx.getTimestamp(),
+                        "dormancyScore", 0.0
+                )
+        );
+
+        txContext.run("""
+                MERGE (a:Account {id: $accountId})
+                ON CREATE SET
+                    a.name              = $name,
+                    a.total_sent        = 0.0,
+                    a.total_received    = $amount,
+                    a.tx_count_out      = 0,
+                    a.tx_count_in       = 1,
+                    a.first_tx_timestamp= $timestamp,
+                    a.last_tx_timestamp = $timestamp,
+                    a.dormancy_score    = 0.0,
+                    a.is_new_account    = true
+                ON MATCH SET
+                    a.name              = $name,
+                    a.total_received    = a.total_received + $amount,
+                    a.tx_count_in       = a.tx_count_in + 1,
+                    a.last_tx_timestamp = $timestamp,
+                    a.is_new_account    = false,
+                    a.dormancy_score    = $dormancyScore
+                """,
+                Map.of(
+                        "accountId", tx.getToAccount(),
+                        "name", tx.getToName() != null ? tx.getToName() : "Unknown",
+                        "amount", tx.getAmount(),
+                        "timestamp", tx.getTimestamp(),
+                        "dormancyScore", 0.0
+                )
+        );
+
+        txContext.run("""
+                MATCH (from:Account {id: $fromId})
+                MATCH (to:Account {id: $toId})
+                CREATE (from)-[r:TRANSFER {
+                    id:             $txId,
+                    amount:         $amount,
+                    currency:       $currency,
+                    payment_format: $paymentFormat,
+                    timestamp:      $timestamp,
+                    pattern_id:     $patternId,
+                    is_fraud:       false,
+                    fraud_score:    0.0,
+                    typology:       'Pending'
+                }]->(to)
+                """,
+                Map.of(
+                        "fromId", tx.getFromAccount(),
+                        "toId", tx.getToAccount(),
+                        "txId", tx.getTransactionId(),
+                        "amount", tx.getAmount(),
+                        "currency", tx.getCurrency() != null ? tx.getCurrency() : "INR",
+                        "paymentFormat", tx.getPaymentFormat() != null ? tx.getPaymentFormat() : "NEFT",
+                        "timestamp", tx.getTimestamp(),
+                        "patternId", tx.getPatternId() != null ? tx.getPatternId() : ""
+                )
+        );
+
+        txContext.run("""
+                MATCH (a:Account {id: $fromId})-[:TRANSFER]->(neighbor)
+                WITH a, count(DISTINCT neighbor) AS cnt
+                SET a.unique_counterparts = cnt
+                """,
+                Map.of("fromId", tx.getFromAccount())
+        );
+
+        txContext.run("""
+                MATCH (a:Account {id: $toId})<-[:TRANSFER]-(neighbor)
+                WITH a, count(DISTINCT neighbor) AS cnt
+                SET a.unique_counterparts = cnt
+                """,
+                Map.of("toId", tx.getToAccount())
+        );
+        return true;
     }
 
 
     // ── QUERY 2-HOP NEIGHBORHOOD ──────────────────────────────────
     // Returns all accounts and transactions within 2 hops
-    // of either endpoint, within 72 hours of trigger transaction.
+    // of either endpoint, using the prototype demo lookback window.
     public Map<String, Object> getNeighborhood(
             String fromAccount,
             String toAccount,
@@ -160,11 +189,18 @@ public class Neo4jRepository {
             return session.readTransaction(t -> {
 
                 // --- 1. FETCH AND PARSE EDGES ---
-                // We explicitly ask Neo4j for 'a.id' and 'b.id' to avoid internal ID bugs
                 Result edgeResult = t.run("""
-                    MATCH (a:Account)-[r:TRANSFER]->(b:Account)
-                    WHERE (a.id = $fromId OR a.id = $toId 
-                           OR b.id = $fromId OR b.id = $toId)
+                    MATCH (seed:Account)
+                    WHERE seed.id IN [$fromId, $toId]
+                    MATCH path = (seed)-[:TRANSFER*1..2]-(neighbor:Account)
+                    WHERE ALL(rel IN relationships(path)
+                              WHERE rel.timestamp >= $timeFrom)
+                    WITH collect(DISTINCT seed) + collect(DISTINCT neighbor) AS rawAccounts
+                    UNWIND rawAccounts AS account
+                    WITH collect(DISTINCT account) AS neighborhoodAccounts
+                    UNWIND neighborhoodAccounts AS a
+                    MATCH (a)-[r:TRANSFER]->(b:Account)
+                    WHERE b IN neighborhoodAccounts
                     AND   r.timestamp >= $timeFrom
                     RETURN a.id AS fromAcc,
                            b.id AS toAcc,
@@ -206,13 +242,13 @@ public class Neo4jRepository {
                 }
 
                 // --- 2. FETCH AND PARSE NODES ---
-                // We use the same matching logic to ensure we get ALL connected nodes in the neighborhood
                 Result nodeResult = t.run("""
-                    MATCH (a:Account)-[r:TRANSFER]->(b:Account)
-                    WHERE (a.id = $fromId OR a.id = $toId 
-                           OR b.id = $fromId OR b.id = $toId)
-                    AND   r.timestamp >= $timeFrom
-                    WITH collect(DISTINCT a) + collect(DISTINCT b) AS rawNodes
+                    MATCH (seed:Account)
+                    WHERE seed.id IN [$fromId, $toId]
+                    MATCH path = (seed)-[:TRANSFER*1..2]-(neighbor:Account)
+                    WHERE ALL(rel IN relationships(path)
+                              WHERE rel.timestamp >= $timeFrom)
+                    WITH collect(DISTINCT seed) + collect(DISTINCT neighbor) AS rawNodes
                     UNWIND rawNodes AS n
                     WITH DISTINCT n AS a
                     RETURN a.id AS accountId,

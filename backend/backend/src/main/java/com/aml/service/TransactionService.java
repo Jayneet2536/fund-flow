@@ -2,10 +2,17 @@ package com.aml.service;
 
 import com.aml.model.*;
 import com.aml.repository.Neo4jRepository;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 
 @Service
 public class TransactionService {
@@ -13,6 +20,19 @@ public class TransactionService {
     private final Neo4jRepository neo4j;
     private final InferenceService inferenceService;
     private final SimpMessagingTemplate messagingTemplate;  // WebSocket
+    private final KafkaTemplate<String, Transaction> kafkaTemplate;
+    private static final Logger log = LoggerFactory.getLogger(TransactionService.class);
+    private final List<Transaction> bufferedTransactions = new ArrayList<>();
+    private final Object bufferLock = new Object();
+
+    @Value("${transactions.topic}")
+    private String transactionsTopic;
+
+    @Value("${transactions.batch.max-size}")
+    private int maxBatchSize;
+
+    @Value("${transactions.batch.flush-interval-ms}")
+    private long flushIntervalMs;
 
     // In-memory store of recent fraud alerts for polling fallback
     private final List<FraudAlert> recentAlerts = Collections.synchronizedList(
@@ -22,20 +42,103 @@ public class TransactionService {
     public TransactionService(
             Neo4jRepository neo4j,
             InferenceService inferenceService,
-            SimpMessagingTemplate messagingTemplate) {
+            SimpMessagingTemplate messagingTemplate,
+            KafkaTemplate<String, Transaction> kafkaTemplate) {
         this.neo4j             = neo4j;
         this.inferenceService  = inferenceService;
         this.messagingTemplate = messagingTemplate;
+        this.kafkaTemplate     = kafkaTemplate;
+    }
+
+    public Map<String, Object> enqueueTransaction(Transaction tx) {
+        try {
+            kafkaTemplate.send(transactionsTopic, tx.getTransactionId(), tx)
+                    .get(10, TimeUnit.SECONDS);
+            log.debug("Queued for Kafka buffer: {} → {} ₹{}",
+                    tx.getFromAccount(), tx.getToAccount(), tx.getAmount());
+            return Map.of(
+                    "transaction_id", tx.getTransactionId(),
+                    "status", "queued",
+                    "buffer", "kafka",
+                    "flush_interval_ms", flushIntervalMs
+            );
+        } catch (Exception e) {
+            log.error("Failed to enqueue transaction {}", tx.getTransactionId(), e);
+            return Map.of(
+                    "transaction_id", tx.getTransactionId(),
+                    "status", "enqueue_failed",
+                    "buffer", "kafka",
+                    "error", e.getMessage()
+            );
+        }
+    }
+
+    @KafkaListener(topics = "${transactions.topic}", groupId = "${spring.kafka.consumer.group-id}")
+    public void bufferTransaction(Transaction tx) {
+        boolean flushNow = false;
+        int currentSize;
+
+        synchronized (bufferLock) {
+            bufferedTransactions.add(tx);
+            currentSize = bufferedTransactions.size();
+            if (currentSize >= maxBatchSize) {
+                flushNow = true;
+            }
+        }
+
+        log.debug("Buffered transaction {}. Pending batch size={}",
+                tx.getTransactionId(), currentSize);
+
+        if (flushNow) {
+            flushBufferedTransactions();
+        }
+    }
+
+    @Scheduled(fixedDelayString = "${transactions.batch.flush-interval-ms}")
+    public void flushBufferedTransactions() {
+        List<Transaction> batch = drainBufferedTransactions();
+        if (batch.isEmpty()) {
+            return;
+        }
+
+        try {
+            List<Transaction> insertedTransactions = neo4j.storeTransactionsBatch(batch);
+            log.debug("Flushed {} buffered transactions to Neo4j ({} new, {} duplicates skipped)",
+                    batch.size(), insertedTransactions.size(), batch.size() - insertedTransactions.size());
+
+            batch = insertedTransactions;
+        } catch (Exception e) {
+            log.error("Batch flush failed; re-queueing {} transactions", batch.size(), e);
+            synchronized (bufferLock) {
+                bufferedTransactions.addAll(0, batch);
+            }
+            return;
+        }
+
+        for (Transaction tx : batch) {
+            try {
+                analyzeStoredTransaction(tx);
+            } catch (Exception e) {
+                log.error("Post-persist analysis failed for transaction {}",
+                        tx.getTransactionId(), e);
+            }
+        }
+    }
+
+    private List<Transaction> drainBufferedTransactions() {
+        synchronized (bufferLock) {
+            if (bufferedTransactions.isEmpty()) {
+                return Collections.emptyList();
+            }
+
+            List<Transaction> batch = new ArrayList<>(bufferedTransactions);
+            bufferedTransactions.clear();
+            return batch;
+        }
     }
 
     @SuppressWarnings("unchecked")
-    public Map<String, Object> processTransaction(Transaction tx) {
-        // Step 1: Store in Neo4j + update node properties
-        neo4j.storeTransaction(tx);
-        System.out.println("Stored: " + tx.getFromAccount()
-                + " → " + tx.getToAccount()
-                + " ₹" + tx.getAmount());
-
+    private void analyzeStoredTransaction(Transaction tx) {
         // Step 2: Get 2-hop neighborhood from Neo4j
         Map<String, Object> neighborhood = neo4j.getNeighborhood(
                 tx.getFromAccount(),
@@ -47,11 +150,11 @@ public class TransactionService {
                 neighborhood.getOrDefault("nodes", new ArrayList<>());
         List<EdgeData> edges = (List<EdgeData>)
                 neighborhood.getOrDefault("edges", new ArrayList<>());
-        System.out.println("DEBUG neighborhood query returned:");
-        System.out.println("  Nodes count : " + nodes.size());
-        System.out.println("  Edges count : " + edges.size());
+        log.debug("DEBUG neighborhood query returned:");
+        log.debug("  Nodes count : " + nodes.size());
+        log.debug("  Edges count : " + edges.size());
         for (EdgeData e : edges) {
-            System.out.println("  Edge: " + e.getFromAccount()
+            log.debug("  Edge: " + e.getFromAccount()
                     + " → " + e.getToAccount()
                     + " ₹" + e.getAmount()
                     + " id=" + e.getEdgeId());
@@ -113,7 +216,7 @@ public class TransactionService {
                 .build();
 
         ScoreResponse scoreResult = inferenceService.score(scoreRequest);
-        System.out.println("Score: " + scoreResult.getTypology()
+        log.debug("Score: " + scoreResult.getTypology()
                 + " | " + scoreResult.getRiskLevel()
                 + " | " + scoreResult.getFraudScore());
 
@@ -155,16 +258,8 @@ public class TransactionService {
 
             // Push via WebSocket to React frontend
             messagingTemplate.convertAndSend("/topic/fraud-alerts", alert);
-            System.out.println("🚨 FRAUD ALERT sent: " + scoreResult.getTypology());
+            log.debug("🚨 FRAUD ALERT sent: " + scoreResult.getTypology());
         }
-
-        return Map.of(
-                "transaction_id", tx.getTransactionId(),
-                "status",         "processed",
-                "is_fraud",       scoreResult.getIsFraud(),
-                "typology",       scoreResult.getTypology(),
-                "risk_level",     scoreResult.getRiskLevel()
-        );
     }
 
     public List<FraudAlert> getRecentAlerts() {
