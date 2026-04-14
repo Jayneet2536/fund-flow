@@ -5,3 +5,4 @@ torch-geometric
 numpy
 google-generativeai
 pydantic
+dotenv

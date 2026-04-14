@@ -949,7 +949,7 @@ def score(request: ScoreRequest):
 def generate_report(request: ReportRequest):
     """
     Generates FIU-IND STR report for a detected fraud.
-    Called by Spring Boot after /score returns is_fraud=True.
+    Called on demand when the frontend requests a report for an alert.
     
     Uses Gemini Flash for narrative generation.
     Falls back to rule-based if Gemini unavailable.

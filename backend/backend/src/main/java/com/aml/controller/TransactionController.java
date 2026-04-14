@@ -22,7 +22,7 @@ public class TransactionController {
     public ResponseEntity<Map<String, Object>> receiveTransaction(
             @RequestBody Transaction transaction) {
 
-        Map<String, Object> result = transactionService.processTransaction(transaction);
+        Map<String, Object> result = transactionService.enqueueTransaction(transaction);
         return ResponseEntity.ok(result);
     }
 }
