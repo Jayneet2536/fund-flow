@@ -1,13 +1,14 @@
 package com.aml.controller;
 
-import com.aml.model.FraudAlert;
+import com.aml.model.AlertPageRequest;
+import com.aml.model.AlertPageResponse;
 import com.aml.service.InferenceService;
 import com.aml.service.TransactionService;
-import com.aml.repository.Neo4jRepository;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.*;
+import org.springframework.messaging.handler.annotation.MessageMapping;
+import org.springframework.messaging.handler.annotation.Payload;
+import org.springframework.messaging.simp.annotation.SendToUser;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.web.client.RestTemplate;
 
 import java.util.*;
 
@@ -15,34 +16,33 @@ import java.util.*;
 @RequestMapping("/api")
 public class AlertController {
 
-    // 1. Group all class fields together at the top
     private final TransactionService transactionService;
     private final InferenceService inferenceService;
-    private final Neo4jRepository neo4j;
-    private final RestTemplate restTemplate;
 
-    @Value("${inference.url}")
-    private String inferenceUrl;
-
-    // 2. Keep ONLY ONE constructor so Spring knows how to autowire
     public AlertController(
             TransactionService transactionService,
-            InferenceService inferenceService,
-            Neo4jRepository neo4j,
-            RestTemplate restTemplate) {
+            InferenceService inferenceService) {
         this.transactionService = transactionService;
         this.inferenceService   = inferenceService;
-        this.neo4j              = neo4j;
-        this.restTemplate       = restTemplate;
     }
 
-    // Frontend polls this for recent fraud alerts
+    // HTTP fallback for recent fraud alerts
     @GetMapping("/alerts")
-    public ResponseEntity<List<FraudAlert>> getAlerts(
+    public ResponseEntity<AlertPageResponse> getAlerts(
+            @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "20") int limit) {
         return ResponseEntity.ok(
-                transactionService.getRecentAlerts()
+                transactionService.getRecentAlerts(page, limit)
         );
+    }
+
+    // WebSocket request-response for recent fraud alerts
+    @MessageMapping("/alerts.snapshot")
+    @SendToUser("/queue/alerts.snapshot")
+    public AlertPageResponse getAlertsSnapshot(@Payload AlertPageRequest request) {
+        int page = request != null && request.getPage() != null ? request.getPage() : 1;
+        int limit = request != null && request.getLimit() != null ? request.getLimit() : 20;
+        return transactionService.getRecentAlerts(page, limit);
     }
 
     // Frontend requests report generation on demand for a selected alert
@@ -51,19 +51,9 @@ public class AlertController {
             @PathVariable String transactionId,
             @RequestBody Map<String, Object> body) {
         try {
-            // Forward the frontend-provided report context to the inference service
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-
-            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
-
-            ResponseEntity<Map> response = restTemplate.exchange(
-                    inferenceUrl + "/report",
-                    HttpMethod.POST,
-                    entity,
-                    Map.class
+            return ResponseEntity.ok(
+                    inferenceService.forwardReportRequest(transactionId, body)
             );
-            return ResponseEntity.ok(response.getBody());
         } catch (Exception e) {
             return ResponseEntity.ok(Map.of("error", e.getMessage()));
         }
