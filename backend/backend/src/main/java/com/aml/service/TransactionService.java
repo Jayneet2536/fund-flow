@@ -63,13 +63,9 @@ public class TransactionService {
                     "flush_interval_ms", flushIntervalMs
             );
         } catch (Exception e) {
-            log.error("Failed to enqueue transaction {}", tx.getTransactionId(), e);
-            return Map.of(
-                    "transaction_id", tx.getTransactionId(),
-                    "status", "enqueue_failed",
-                    "buffer", "kafka",
-                    "error", e.getMessage()
-            );
+            log.error("Failed to enqueue transaction {}. Falling back to direct processing.",
+                    tx.getTransactionId(), e);
+            return processTransactionDirectly(tx, e.getMessage());
         }
     }
 
@@ -243,8 +239,13 @@ public class TransactionService {
                     .typology(scoreResult.getTypology())
                     .riskLevel(scoreResult.getRiskLevel())
                     .fraudScore(scoreResult.getFraudScore())
+                    .rawGnnScore(scoreResult.getRawGnnScore())
+                    .confidence(scoreResult.getConfidence())
+                    .latencyMs(scoreResult.getLatencyMs())
                     .triggerTransactionId(tx.getTransactionId())
                     .graphData(scoreResult.getGraphData())
+                    .nodes(new ArrayList<>(nodes))
+                    .edges(new ArrayList<>(edges))
                     .evidenceChain(scoreResult.getEvidenceChain())
                     .riskBreakdown(scoreResult.getRiskBreakdown())
                     .totalAmount(totalAmount)
@@ -264,5 +265,62 @@ public class TransactionService {
 
     public List<FraudAlert> getRecentAlerts() {
         return new ArrayList<>(recentAlerts);
+    }
+
+    public List<FraudAlert> getRecentAlerts(int limit) {
+        int safeLimit = Math.max(limit, 0);
+        synchronized (recentAlerts) {
+            return recentAlerts.stream()
+                    .limit(safeLimit)
+                    .toList();
+        }
+    }
+
+    public AlertPageResponse getRecentAlerts(int page, int limit) {
+        int safeLimit = Math.max(limit, 1);
+        int safePage = Math.max(page, 1);
+
+        synchronized (recentAlerts) {
+            int total = recentAlerts.size();
+            int fromIndex = Math.min((safePage - 1) * safeLimit, total);
+            int toIndex = Math.min(fromIndex + safeLimit, total);
+            int totalPages = total == 0 ? 0 : (int) Math.ceil((double) total / safeLimit);
+
+            return AlertPageResponse.builder()
+                    .items(new ArrayList<>(recentAlerts.subList(fromIndex, toIndex)))
+                    .page(safePage)
+                    .limit(safeLimit)
+                    .total(total)
+                    .totalPages(totalPages)
+                    .build();
+        }
+    }
+
+    private Map<String, Object> processTransactionDirectly(
+            Transaction tx,
+            String kafkaError) {
+        try {
+            boolean inserted = neo4j.storeTransaction(tx);
+            if (inserted) {
+                analyzeStoredTransaction(tx);
+            }
+
+            return Map.of(
+                    "transaction_id", tx.getTransactionId(),
+                    "status", inserted ? "processed_direct" : "duplicate_skipped",
+                    "buffer", "direct",
+                    "kafka_error", kafkaError
+            );
+        } catch (Exception directException) {
+            log.error("Direct processing fallback failed for transaction {}",
+                    tx.getTransactionId(), directException);
+            return Map.of(
+                    "transaction_id", tx.getTransactionId(),
+                    "status", "processing_failed",
+                    "buffer", "direct",
+                    "kafka_error", kafkaError,
+                    "error", directException.getMessage()
+            );
+        }
     }
 }

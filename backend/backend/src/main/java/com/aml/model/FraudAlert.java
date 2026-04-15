@@ -19,11 +19,23 @@ public class FraudAlert {
     @JsonProperty("fraud_score")
     private Double fraudScore;
 
+    @JsonProperty("raw_gnn_score")
+    private Double rawGnnScore;
+
+    private Double confidence;
+
+    @JsonProperty("latency_ms")
+    private Double latencyMs;
+
     @JsonProperty("trigger_transaction_id")
     private String triggerTransactionId;
 
     @JsonProperty("graph_data")
     private Map<String, Object> graphData;
+
+    private List<AccountNode> nodes;
+
+    private List<EdgeData> edges;
 
     @JsonProperty("evidence_chain")
     private List<Map<String, Object>> evidenceChain;

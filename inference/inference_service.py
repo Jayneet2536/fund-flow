@@ -42,6 +42,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+
+# response = client.models.generate_content(
+#     model="gemini-1.5-flash",
+#     contents="Hello"
+# )
+
 # ── CONFIG ────────────────────────────────────────────────────────────
 MODEL_PATH             = "best_model1.pt"
 INFERENCE_TEMPERATURE  = 3.0
@@ -644,7 +651,7 @@ def generate_str_report(
     # Try Gemini first
     if GEMINI_API_KEY:
         try:
-            import google.generativeai as genai
+            import google.genai as genai
             genai.configure(api_key=GEMINI_API_KEY)
             gemini = genai.GenerativeModel("gemini-1.5-flash")
 
