@@ -237,13 +237,35 @@ public class TransactionService {
             List<String> accountIds = new ArrayList<>();
             nodes.forEach(n -> accountIds.add(n.getAccountId()));
 
+            EdgeData triggerEdge = edges.stream()
+                    .filter(edge -> Boolean.TRUE.equals(edge.getIsTrigger()))
+                    .findFirst()
+                    .orElseGet(() -> EdgeData.builder()
+                            .edgeId(tx.getTransactionId())
+                            .fromAccount(tx.getFromAccount())
+                            .toAccount(tx.getToAccount())
+                            .amount(tx.getAmount())
+                            .currency(tx.getCurrency() != null ? tx.getCurrency() : "INR")
+                            .paymentFormat(tx.getPaymentFormat() != null ? tx.getPaymentFormat() : "NEFT")
+                            .timestamp(tx.getTimestamp())
+                            .isTrigger(true)
+                            .build());
+
             FraudAlert alert = FraudAlert.builder()
                     .id(tx.getTransactionId())
                     .timestamp(tx.getTimestamp())
                     .typology(scoreResult.getTypology())
                     .riskLevel(scoreResult.getRiskLevel())
                     .fraudScore(scoreResult.getFraudScore())
+                    .rawGnnScore(scoreResult.getRawGnnScore())
+                    .confidence(scoreResult.getConfidence())
+                    .latencyMs(scoreResult.getLatencyMs())
                     .triggerTransactionId(tx.getTransactionId())
+                    .triggerAmount(triggerEdge.getAmount())
+                    .triggerCurrency(triggerEdge.getCurrency())
+                    .paymentFormat(triggerEdge.getPaymentFormat())
+                    .fromAccount(triggerEdge.getFromAccount())
+                    .toAccount(triggerEdge.getToAccount())
                     .graphData(scoreResult.getGraphData())
                     .evidenceChain(scoreResult.getEvidenceChain())
                     .riskBreakdown(scoreResult.getRiskBreakdown())
@@ -263,6 +285,22 @@ public class TransactionService {
     }
 
     public List<FraudAlert> getRecentAlerts() {
-        return new ArrayList<>(recentAlerts);
+        return getRecentAlerts(20);
     }
+<<<<<<< Updated upstream
+=======
+
+    public List<FraudAlert> getRecentAlerts(int limit) {
+        int safeLimit = Math.max(limit, 0);
+        List<FraudAlert> alerts = new ArrayList<>(recentAlerts);
+        return alerts.subList(0, Math.min(safeLimit, alerts.size()));
+    }
+
+    public Optional<FraudAlert> getAlertById(String transactionId) {
+        return recentAlerts.stream()
+                .filter(alert -> Objects.equals(alert.getId(), transactionId)
+                        || Objects.equals(alert.getTriggerTransactionId(), transactionId))
+                .findFirst();
+    }
+>>>>>>> Stashed changes
 }
