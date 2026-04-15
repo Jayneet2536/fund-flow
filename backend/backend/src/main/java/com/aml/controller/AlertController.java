@@ -41,11 +41,22 @@ public class AlertController {
     public ResponseEntity<List<FraudAlert>> getAlerts(
             @RequestParam(defaultValue = "20") int limit) {
         return ResponseEntity.ok(
-                transactionService.getRecentAlerts()
+                transactionService.getRecentAlerts(limit)
         );
     }
 
+<<<<<<< Updated upstream
     // Frontend requests report generation on demand for a selected alert
+=======
+    @GetMapping("/alerts/{transactionId}")
+    public ResponseEntity<FraudAlert> getAlertById(@PathVariable String transactionId) {
+        return transactionService.getAlertById(transactionId)
+                .map(ResponseEntity::ok)
+                .orElseGet(() -> ResponseEntity.notFound().build());
+    }
+
+    // Frontend requests report generation
+>>>>>>> Stashed changes
     @PostMapping("/alerts/{transactionId}/report")
     public ResponseEntity<Map<String, Object>> generateReport(
             @PathVariable String transactionId,
